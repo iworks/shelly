@@ -1,41 +1,41 @@
-// Aquarium RGB sunrise/sunset script.
-// Runs BEFORE the white light in the morning (11:15-11:45) and AFTER it
-// in the evening (20:00-20:30), ramping through colors like a real sunset.
+// Aquarium accent light (sunrise/sunset) script for a 0-10V dimmer.
+// NOTE: a 0-10V dimmer has a single brightness channel, so the "color"
+// transitions are simulated by intensity: brightens during the sunrise
+// window (11:15-11:45, before the white light takes over) and dims during
+// the sunset window (20:00-20:30, after the white light turns off).
 
 // Script configuration
 var CONFIG = {
-  id: 0, // RGB Light component ID
+  id: 0, // Light component ID on this 0-10V dimmer device (always 0)
   kvsKey: "aquarium_color_fade_state",
 
-  // Morning sunrise: 11:15 -> 11:45, deep orange-red to warm white, then off
-  // (the white light script takes over at 11:45)
+  // Morning sunrise: 11:15 -> 11:45, ramp up to 100%, then off
+  // (the white light script on the other device takes over at 11:45)
   morning: {
     cron: "0 15 11 * * *", // 11:15 AM every day
     comment: "ColorSunrise_1115",
     durationMin: 30,
-    startColor: { r: 255, g: 60, b: 0 },
-    endColor: { r: 255, g: 190, b: 120 },
+    endBrightness: 100,
     turnOffAtEnd: true
   },
 
-  // Evening sunset: 20:00 -> 20:30, warm white to deep red, then off
-  // (the white light script turns off at 20:00)
+  // Evening sunset: 20:00 -> 20:30, start at 100% and ramp down to 0%, off
+  // (the white light script on the other device turns off at 20:00)
   evening: {
     cron: "0 0 20 * * *", // 08:00 PM every day
     comment: "ColorSunset_2000",
     durationMin: 30,
-    startColor: { r: 255, g: 190, b: 120 },
-    endColor: { r: 255, g: 40, b: 0 },
+    endBrightness: 0,
     turnOffAtEnd: true
   }
 };
 
 // Helper variables for the fading process timer
 var fadeTimer = null;
-var currentColor = null;
-var targetColor = null;
+var currentBrightness = 0;
+var targetBrightness = 0;
+var stepValue = 0;
 var stepsRemaining = 0;
-var startColorCopy = null;
 var turnOffAtEnd = false;
 
 // RPC wrapper with error logging (fails loudly instead of silently)
@@ -55,9 +55,9 @@ function saveFadeState() {
     key: CONFIG.kvsKey,
     value: JSON.stringify({
       running: true,
-      current: currentColor,
-      target: targetColor,
-      start: startColorCopy,
+      brightness: currentBrightness,
+      target: targetBrightness,
+      step: stepValue,
       stepsRemaining: stepsRemaining,
       turnOffAtEnd: turnOffAtEnd
     })
@@ -69,93 +69,95 @@ function clearFadeState() {
   rpc("KVS.Delete", { key: CONFIG.kvsKey });
 }
 
-// Apply a color to the light (clamped to 0-255)
-function applyColor(c) {
-  var r = Math.round(c.r); if (r < 0) r = 0; if (r > 255) r = 255;
-  var g = Math.round(c.g); if (g < 0) g = 0; if (g > 255) g = 255;
-  var b = Math.round(c.b); if (b < 0) b = 0; if (b > 255) b = 255;
-  rpc("Light.Set", { id: CONFIG.id, on: true, rgb: [r, g, b] });
-}
-
-// Function executing a single color ramp step
+// Function executing a single brightness adjustment step
 function executeFadeStep() {
   if (stepsRemaining <= 0) {
-    // End of the ramp: snap exactly to the target color
+    // End of the dimming/brightening process
     Timer.clear(fadeTimer);
     fadeTimer = null;
 
-    applyColor(targetColor);
+    // Snap exactly to the target to remove rounding drift
+    rpc("Light.Set", { id: CONFIG.id, on: true, brightness: targetBrightness });
 
+    // Turn off the device completely at the end of the sequence
     if (turnOffAtEnd) {
       rpc("Light.Set", { id: CONFIG.id, on: false });
     }
 
     clearFadeState();
-    print("Color ramp finished");
+    print("Accent light fade finished at " + targetBrightness + "%");
     return;
   }
 
+  currentBrightness += stepValue;
   stepsRemaining--;
 
-  // Interpolate each channel from the start color toward the target color
-  var ratio = 1 - stepsRemaining / totalStepsCount;
-  currentColor = {
-    r: startColorCopy.r + (targetColor.r - startColorCopy.r) * ratio,
-    g: startColorCopy.g + (targetColor.g - startColorCopy.g) * ratio,
-    b: startColorCopy.b + (targetColor.b - startColorCopy.b) * ratio
-  };
+  // Safeguard to keep brightness within the 0-100 range
+  var setVal = Math.round(currentBrightness);
+  if (setVal < 0) setVal = 0;
+  if (setVal > 100) setVal = 100;
 
-  applyColor(currentColor);
+  rpc("Light.Set", { id: CONFIG.id, on: true, brightness: setVal });
   saveFadeState();
 }
 
-// Total step counter (used for interpolation ratio)
-var totalStepsCount = 0;
-
-// Function initializing the color ramp process
-function startColorRamp(phase) {
-  // If a previous fading process is running, stop it
-  if (fadeTimer) {
-    Timer.clear(fadeTimer);
-    fadeTimer = null;
-  }
-
-  startColorCopy = { r: phase.startColor.r, g: phase.startColor.g, b: phase.startColor.b };
-  targetColor = { r: phase.endColor.r, g: phase.endColor.g, b: phase.endColor.b };
+// Continues setting up the fade once the actual brightness is known
+function startFadeWithBrightness(actualBrightness, phase) {
+  // Always fade from the real current level to avoid brightness jumps
+  currentBrightness = actualBrightness;
+  targetBrightness = phase.endBrightness;
   turnOffAtEnd = phase.turnOffAtEnd;
-  totalStepsCount = phase.durationMin;
-  stepsRemaining = phase.durationMin;
 
-  // Set the initial color and turn on the device
-  currentColor = startColorCopy;
-  applyColor(currentColor);
+  // Calculate the step value for each 1-minute interval
+  var totalSteps = phase.durationMin;
+  stepValue = (targetBrightness - currentBrightness) / totalSteps;
+  stepsRemaining = totalSteps;
+
+  // Set the initial brightness value and turn on the device
+  rpc("Light.Set", { id: CONFIG.id, on: true, brightness: Math.round(currentBrightness) });
   saveFadeState();
 
   // Start the timer to execute a step every 60 seconds (60000 ms)
   fadeTimer = Timer.set(60000, true, executeFadeStep);
 }
 
-// Resumes a ramp that was interrupted by a reboot (state read from KVS)
-function resumeRampFromState(state) {
-  startColorCopy = state.start;
-  targetColor = state.target;
-  currentColor = state.current;
-  turnOffAtEnd = state.turnOffAtEnd;
-  totalStepsCount = state.stepsRemaining; // approximation: ratio continues smoothly
-  stepsRemaining = state.stepsRemaining;
+// Function initializing the fading process: read the real light level first
+function startFade(phase) {
+  // If a previous fading process is running, stop it
+  if (fadeTimer) {
+    Timer.clear(fadeTimer);
+    fadeTimer = null;
+  }
 
-  print("Resuming interrupted color ramp, " + stepsRemaining + " min left");
+  rpc("Light.GetStatus", { id: CONFIG.id }, function (result) {
+    var actual = 0;
+    if (result && typeof result.brightness === "number") {
+      actual = result.brightness;
+    }
+    startFadeWithBrightness(actual, phase);
+  });
+}
+
+// Resumes a fade that was interrupted by a reboot (state read from KVS)
+function resumeFadeFromState(state) {
+  currentBrightness = state.brightness;
+  targetBrightness = state.target;
+  stepValue = state.step;
+  stepsRemaining = state.stepsRemaining;
+  turnOffAtEnd = state.turnOffAtEnd;
+
+  print("Resuming interrupted accent light fade: " + Math.round(currentBrightness) + "% -> " + targetBrightness + "%, " + stepsRemaining + " min left");
 
   fadeTimer = Timer.set(60000, true, executeFadeStep);
 }
 
-// Checks KVS for an interrupted ramp and resumes it if found
-function checkInterruptedRamp() {
+// Checks KVS for an interrupted fade and resumes it if found
+function checkInterruptedFade() {
   rpc("KVS.Get", { key: CONFIG.kvsKey }, function (result) {
     if (!result || !result.value) return;
     var state = JSON.parse(result.value);
     if (state && state.running && state.stepsRemaining > 0) {
-      resumeRampFromState(state);
+      resumeFadeFromState(state);
     }
   });
 }
@@ -187,7 +189,7 @@ function setupSchedules() {
         comment: CONFIG.morning.comment,
         calls: [{
           method: "Script.Eval",
-          params: { id: Shelly.getCurrentScriptId(), code: "startColorRamp(CONFIG.morning);" }
+          params: { id: Shelly.getCurrentScriptId(), code: "startFade(CONFIG.morning);" }
         }]
       });
     }
@@ -200,7 +202,7 @@ function setupSchedules() {
         comment: CONFIG.evening.comment,
         calls: [{
           method: "Script.Eval",
-          params: { id: Shelly.getCurrentScriptId(), code: "startColorRamp(CONFIG.evening);" }
+          params: { id: Shelly.getCurrentScriptId(), code: "startFade(CONFIG.evening);" }
         }]
       });
     }
@@ -210,7 +212,7 @@ function setupSchedules() {
 // Initialize schedules when the device boots up
 setupSchedules();
 
-// Resume a ramp if the device was rebooted mid-fade
-checkInterruptedRamp();
+// Resume a fade if the device was rebooted mid-fade
+checkInterruptedFade();
 
-print("RGB sunrise/sunset script has been successfully initialized.");
+print("Accent light (sunrise/sunset) schedule script has been successfully initialized.");

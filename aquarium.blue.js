@@ -4,7 +4,7 @@
 
 // Script configuration
 var CONFIG = {
-  id: 1, // Blue channel Light component ID (separate dimmer / light channel)
+  id: 0, // Light component ID on this 0-10V dimmer device (always 0)
   kvsKey: "aquarium_blue_fade_state",
 
   // Evening moonlight on: 20:00 -> 20:15, up to 40%

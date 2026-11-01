@@ -136,7 +136,35 @@ curl -u admin:PASSWORD -d '{"id":1}' http://192.168.1.42/rpc/Script.GetStatus
 
 ---
 
-## 6. Common Pitfalls Checklist
+## 7. Deployment in this setup
+
+All three aquarium lights are **standalone Shelly 0-10V dimmers** — one device per light, each with a single `Light` channel (`id: 0` always). Each script is deployed to **its own device**:
+
+| Script | Device | Schedule comments |
+|---|---|---|
+| `aquarium.white.js` | White light dimmer | `FadeIn_1145`, `FadeOut_2000` |
+| `aquarium.color.js` | Accent light dimmer (brightness-only "sunrise/sunset" simulation) | `ColorSunrise_1115`, `ColorSunset_2000` |
+| `aquarium.blue.js` | Moonlight/actinic dimmer | `MoonIn_2000`, `MoonOut_2145` |
+
+Daily timeline:
+
+```
+11:15–11:45  Accent ramp up to 100%, then off (sunrise simulation)
+11:45–12:00  White fade-in: 0% → 70%
+20:00–20:15  White fade-out: 70% → 0%, off
+20:00–20:30  Accent ramp down 100% → 0%, off (sunset simulation)
+20:00–20:15  Blue moonlight fade-in: 0% → 40%
+21:45–22:00  Blue moonlight fade-out: 40% → 0%, off
+```
+
+- KVS keys are per-device, so the same `kvsKey` pattern in every script causes no conflicts.
+- All three scripts must have **"Run at boot"** enabled in each device's WebUI.
+- Since devices are independent, schedules are created only on the device that runs the light.
+
+---
+
+## 8. Common Pitfalls Checklist
+
 
 - [ ] Cron timespec has **6 fields, seconds first** (`"0 0 20 * * *"` = 20:00:00 daily, *not* `"0 20 * * *"`).
 - [ ] Callbacks are async — never assume an RPC result is available on the next line.
